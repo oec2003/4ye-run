@@ -118,7 +118,7 @@ const formatContent = (content: string) => {
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
-  font-size: 2.5em;
+  font-size: 2em;
   font-weight: 900;
   text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
   position: relative;
@@ -319,6 +319,21 @@ const formatContent = (content: string) => {
   .day {
     font-size: 0.7em;
   }
+
+
+.year-text {
+  background: linear-gradient(45deg, #00dc82, #00b4d8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: 1.4em;
+  font-weight: 900;
+  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+  position: relative;
+  display: inline-block;
+  padding: 0 20px;
+  margin-top: 0;
+}
 }
 
 .loading, .error {
@@ -341,9 +356,10 @@ const formatContent = (content: string) => {
   position: relative;
   z-index: 2;
   background: white;
-  margin: 40px 0;
+  /* margin: 0px 0; */
   text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
 }
+
 
 .year-marker::before {
   content: '';

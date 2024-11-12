@@ -29,7 +29,7 @@ header {
 
 .site-title {
   text-align: center;
-  font-size: 1.8rem;
+  font-size: 2.5rem;
   font-weight: 800;
   background: linear-gradient(45deg, #00dc82 30%, #00b4d8 70%);
   -webkit-background-clip: text;
@@ -74,7 +74,7 @@ footer p {
 /* 移动端优化 */
 @media screen and (max-width: 768px) {
   .site-title {
-    font-size: 1.4rem;
+    font-size: 1.6rem;
     letter-spacing: 1px;
   }
 
