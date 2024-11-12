@@ -16,5 +16,8 @@
     "typescript": "^5.0.0",
     "vue": "^3.4.0",
     "vue-router": "^4.2.0"
+  },
+  "dependencies": {
+    "@nuxtjs/vercel-builder": "latest"
   }
 } 

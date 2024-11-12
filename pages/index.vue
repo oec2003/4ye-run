@@ -177,7 +177,7 @@ const formatContent = (content: string) => {
 
 .timeline-content {
   padding: 20px;
-  background: white;
+  background: #f3e0fa;
   border-radius: 12px;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
   transition: transform 0.3s ease;
