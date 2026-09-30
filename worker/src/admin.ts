@@ -2,13 +2,42 @@ import { isSafeExternalUrl, markdownToBodyBlocks } from '../../contracts/body-bl
 import { sha256Hex } from '../../contracts/hash'
 import type { ContentDetail, ContentWrite, MemberAccount, MemberPlatform } from '../../contracts/types'
 import type { D1PreparedStatement, D1Row, Env } from './cloudflare'
-import { adminHeaders, ApiError, assertReadyAssets, contentDetail, contentSummary, detectedMime, extensionForMime, idempotencyKey, json, memberAccount, memberDetail, memberSummary, parseJson, readJson, requireUuid, rows, success, validMime, validateContentWrite } from './helpers'
+import { adminHeaders, ApiError, assertReadyAssets, assetFromRow, contentDetail, contentSummary, detectedMime, extensionForMime, idempotencyKey, json, memberDetail, memberSummary, parsePage, readJson, requireUuid, rows, success, validMime, validateContentWrite } from './helpers'
 
 const adminContentColumns = `c.*, a.public_url AS cover_url,
   (SELECT json_group_array(json_object('memberId', co.member_id, 'displayName', co.display_name, 'role', co.role)) FROM contributors co WHERE co.content_id = c.id ORDER BY co.sort_order) AS contributors_json,
   (SELECT json_group_array(asset_id) FROM content_assets ca WHERE ca.content_id = c.id AND ca.role = 'body' ORDER BY ca.sort_order) AS image_asset_ids_json`
 
 interface IdempotencyRow extends D1Row { request_hash: string; response_json: string }
+
+// Each dependent mutation is gated by the receipt created immediately after the
+// successful CAS statement, within the SAME D1 batch transaction. A matching
+// version alone is insufficient: it may belong to a different winning request.
+const appliedReceipt = `EXISTS (SELECT 1 FROM idempotency_records WHERE idempotency_key = ? AND request_hash = ?)`
+function receiptAfterChange(env: Env, key: string, operation: string, hash: string, envelope: unknown, id: string, now: string): D1PreparedStatement {
+  return env.DB.prepare(`INSERT INTO idempotency_records (idempotency_key,operation,request_hash,response_json,entity_id,created_at) SELECT ?,?,?,?,?,? WHERE changes() = 1`)
+    .bind(key, operation, hash, JSON.stringify(envelope), id, now)
+}
+async function commitBatch(env: Env, table: 'contents' | 'members', id: string, statements: D1PreparedStatement[], key: string, hash: string): Promise<Response | null> {
+  try {
+    const results = await env.DB.batch(statements)
+    if (!results[0]?.results?.length) {
+      const raced = await priorResponse(env, key, hash)
+      if (raced) return raced
+      await conflict(env, table, id)
+    }
+  } catch (error) {
+    const raced = await priorResponse(env, key, hash)
+    if (raced) return raced
+    throw error
+  }
+  return null
+}
+async function hydrateSnapshot(env: Env, snapshot: ContentDetail): Promise<ContentDetail> {
+  const ids = [...new Set([snapshot.coverAssetId, snapshot.posterAssetId, ...snapshot.imageAssetIds].filter(Boolean))] as string[]
+  const assetRows = ids.length ? await rows<D1Row>(env.DB.prepare(`SELECT * FROM assets WHERE status='ready' AND id IN (${ids.map(() => '?').join(',')})`).bind(...ids)) : []
+  return { ...snapshot, bodyBlocks: markdownToBodyBlocks(snapshot.bodyMarkdown).blocks, assets: Object.fromEntries(assetRows.map(row => [String(row.id), assetFromRow(row)])) }
+}
 
 async function priorResponse(env: Env, key: string, requestHash: string): Promise<Response | null> {
   const prior = await env.DB.prepare('SELECT request_hash, response_json FROM idempotency_records WHERE idempotency_key = ?').bind(key).first<IdempotencyRow>()
@@ -31,8 +60,10 @@ export async function handleAdmin(request: Request, env: Env, segments: string[]
 
 async function handleContents(request: Request, env: Env, path: string[], requestId: string): Promise<Response> {
   if (!path.length && request.method === 'GET') {
-    const result = await rows<D1Row>(env.DB.prepare(`SELECT ${adminContentColumns} FROM contents c LEFT JOIN assets a ON a.id = c.cover_asset_id ORDER BY c.updated_at DESC, c.id DESC LIMIT 50`))
-    return success(result.map((row) => ({ ...contentSummary(row), status: row.status })), requestId, undefined, adminHeaders())
+    const { page, pageSize, offset } = parsePage(new URL(request.url))
+    const result = await rows<D1Row>(env.DB.prepare(`SELECT ${adminContentColumns} FROM contents c LEFT JOIN assets a ON a.id = c.cover_asset_id ORDER BY c.updated_at DESC, c.id DESC LIMIT ? OFFSET ?`).bind(pageSize, offset))
+    const total = Number((await env.DB.prepare('SELECT count(*) AS total FROM contents').first<D1Row>())?.total || 0)
+    return success(result.map((row) => ({ ...contentSummary(row), status: row.status })), requestId, { page, pageSize, total, hasMore: offset + pageSize < total }, adminHeaders())
   }
   const id = requireUuid(path[0] || '')
   if (path.length === 1 && request.method === 'GET') {
@@ -52,7 +83,7 @@ async function handleContents(request: Request, env: Env, path: string[], reques
     }
     const revision = await env.DB.prepare(`SELECT * FROM revisions WHERE entity_type = 'content' AND entity_id = ? AND version = ?`).bind(id, Number(path[2])).first<D1Row>()
     if (!revision) throw new ApiError(404, 'NOT_FOUND', '历史版本不存在。')
-    return success(JSON.parse(String(revision.snapshot_json)), requestId, undefined, adminHeaders())
+    return success(await hydrateSnapshot(env, JSON.parse(String(revision.snapshot_json)) as ContentDetail), requestId, undefined, adminHeaders())
   }
   if (path[1] === 'restore' && request.method === 'POST') {
     const body = await readJson<{ expectedVersion: number; revisionVersion: number }>(request)
@@ -81,29 +112,21 @@ async function executeContentPublish(request: Request, env: Env, id: string, exp
   const envelope = { data: published, requestId }
   const statements: D1PreparedStatement[] = []
   statements.push(env.DB.prepare(`INSERT INTO contents (id,type,title,summary,format,body_markdown,cover_asset_id,poster_asset_id,author_member_id,author_display_name,tags_json,period_start,period_end,stats_json,status,version,content_hash,published_at,updated_at)
-    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,'published',1,?,?,? WHERE ? = 0
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,'published',1,?,?,? WHERE ? = 0 OR EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)
     ON CONFLICT(id) DO UPDATE SET title=excluded.title,summary=excluded.summary,format=excluded.format,body_markdown=excluded.body_markdown,cover_asset_id=excluded.cover_asset_id,poster_asset_id=excluded.poster_asset_id,author_member_id=excluded.author_member_id,author_display_name=excluded.author_display_name,tags_json=excluded.tags_json,period_start=excluded.period_start,period_end=excluded.period_end,stats_json=excluded.stats_json,status='published',version=contents.version+1,content_hash=excluded.content_hash,published_at=excluded.published_at,updated_at=excluded.updated_at
-    WHERE contents.version = ? AND contents.type = excluded.type RETURNING version`).bind(id, content.type, content.title.trim(), content.summary.trim(), content.format, content.bodyMarkdown, content.coverAssetId, content.posterAssetId, content.authorMemberId, content.authorDisplayName, JSON.stringify(content.tags), content.periodStart, content.periodEnd, content.stats ? JSON.stringify(content.stats) : null, contentHash, content.publishedAt, now, expectedVersion, expectedVersion))
-  statements.push(env.DB.prepare(`DELETE FROM contributors WHERE content_id = ? AND EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(id, id, nextVersion))
-  content.contributors.forEach((item, index) => statements.push(env.DB.prepare(`INSERT INTO contributors (content_id,member_id,display_name,role,sort_order) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(id, item.memberId, item.displayName, item.role, index, id, nextVersion)))
-  statements.push(env.DB.prepare(`DELETE FROM content_assets WHERE content_id = ? AND EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(id, id, nextVersion))
+    WHERE contents.version = ? AND contents.type = excluded.type RETURNING version`).bind(id, content.type, content.title.trim(), content.summary.trim(), content.format, content.bodyMarkdown, content.coverAssetId, content.posterAssetId, content.authorMemberId, content.authorDisplayName, JSON.stringify(content.tags), content.periodStart, content.periodEnd, content.stats ? JSON.stringify(content.stats) : null, contentHash, content.publishedAt, now, expectedVersion, id, expectedVersion, expectedVersion))
+  statements.push(receiptAfterChange(env, key, operation, requestHash, envelope, id, now))
+  statements.push(env.DB.prepare(`DELETE FROM contributors WHERE content_id = ? AND ${appliedReceipt}`).bind(id, key, requestHash))
+  content.contributors.forEach((item, index) => statements.push(env.DB.prepare(`INSERT INTO contributors (content_id,member_id,display_name,role,sort_order) SELECT ?,?,?,?,? WHERE ${appliedReceipt}`).bind(id, item.memberId, item.displayName, item.role, index, key, requestHash)))
+  statements.push(env.DB.prepare(`DELETE FROM content_assets WHERE content_id = ? AND ${appliedReceipt}`).bind(id, key, requestHash))
   const associations: Array<[string, 'cover' | 'poster' | 'body', number]> = []
   if (content.coverAssetId) associations.push([content.coverAssetId, 'cover', 0])
   if (content.posterAssetId) associations.push([content.posterAssetId, 'poster', 0])
   content.imageAssetIds.forEach((assetId, index) => associations.push([assetId, 'body', index]))
-  associations.forEach(([assetId, role, order]) => statements.push(env.DB.prepare(`INSERT INTO content_assets (content_id,asset_id,role,sort_order) SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(id, assetId, role, order, id, nextVersion)))
-  statements.push(env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'content',?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(id, nextVersion, JSON.stringify(published), contentHash, 'obsidian-publisher', now, id, nextVersion))
-  statements.push(env.DB.prepare(`INSERT INTO idempotency_records (idempotency_key,operation,request_hash,response_json,entity_id,created_at) SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id = ? AND version = ?)`).bind(key, operation, requestHash, JSON.stringify(envelope), id, now, id, nextVersion))
-  try {
-    const results = await env.DB.batch(statements)
-    const applied = results[0]?.results?.[0] as { version?: number } | undefined
-    if (!applied || Number(applied.version) !== nextVersion) await conflict(env, 'contents', id)
-  } catch (error) {
-    const raced = await priorResponse(env, key, requestHash)
-    if (raced) return raced
-    if (error instanceof ApiError) throw error
-    throw error
-  }
+  associations.forEach(([assetId, role, order]) => statements.push(env.DB.prepare(`INSERT INTO content_assets (content_id,asset_id,role,sort_order) SELECT ?,?,?,? WHERE ${appliedReceipt}`).bind(id, assetId, role, order, key, requestHash)))
+  statements.push(env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'content',?,?,?,?,?,? WHERE ${appliedReceipt}`).bind(id, nextVersion, JSON.stringify(published), contentHash, 'obsidian-publisher', now, key, requestHash))
+  const raced = await commitBatch(env, 'contents', id, statements, key, requestHash)
+  if (raced) return raced
   return json(envelope, 200, adminHeaders())
 }
 
@@ -120,12 +143,12 @@ async function unpublishContent(request: Request, env: Env, id: string, requestI
   const now = new Date().toISOString()
   const snapshot = { ...(await contentDetail(env.DB, current)), status: 'unpublished', version: nextVersion, updatedAt: now }
   const envelope = { data: { id, status: 'unpublished', version: nextVersion, updatedAt: now }, requestId }
-  const results = await env.DB.batch([
+  const raced = await commitBatch(env, 'contents', id, [
     env.DB.prepare(`UPDATE contents SET status='unpublished',version=version+1,updated_at=? WHERE id=? AND version=? RETURNING version`).bind(now, id, body.expectedVersion),
-    env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'content',?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id=? AND version=?)`).bind(id, nextVersion, JSON.stringify(snapshot), String(current.content_hash), 'obsidian-publisher', now, id, nextVersion),
-    env.DB.prepare(`INSERT INTO idempotency_records (idempotency_key,operation,request_hash,response_json,entity_id,created_at) SELECT ?,'unpublish',?,?,?,? WHERE EXISTS (SELECT 1 FROM contents WHERE id=? AND version=?)`).bind(key, requestHash, JSON.stringify(envelope), id, now, id, nextVersion)
-  ])
-  if (!results[0]?.results?.length) await conflict(env, 'contents', id)
+    receiptAfterChange(env, key, 'unpublish', requestHash, envelope, id, now),
+    env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'content',?,?,?,?,?,? WHERE ${appliedReceipt}`).bind(id, nextVersion, JSON.stringify(snapshot), String(current.content_hash), 'obsidian-publisher', now, key, requestHash)
+  ], key, requestHash)
+  if (raced) return raced
   return json(envelope, 200, adminHeaders())
 }
 
@@ -137,14 +160,16 @@ interface MemberWriteBody {
 
 async function handleMembers(request: Request, env: Env, path: string[], requestId: string): Promise<Response> {
   if (!path.length && request.method === 'GET') {
-    const list = await rows<D1Row>(env.DB.prepare(`SELECT m.*, a.public_url AS avatar_url, (SELECT json_group_array(DISTINCT platform) FROM member_accounts ma WHERE ma.member_id=m.id) AS platforms_json FROM members m LEFT JOIN assets a ON a.id=m.avatar_asset_id ORDER BY m.sort_order,m.id LIMIT 100`))
-    return success(list.map((row) => ({ ...memberSummary(row), status: row.status })), requestId, undefined, adminHeaders())
+    const { page, pageSize, offset } = parsePage(new URL(request.url))
+    const list = await rows<D1Row>(env.DB.prepare(`SELECT m.*, a.public_url AS avatar_url, (SELECT json_group_array(DISTINCT platform) FROM member_accounts ma WHERE ma.member_id=m.id) AS platforms_json FROM members m LEFT JOIN assets a ON a.id=m.avatar_asset_id ORDER BY m.sort_order,m.id LIMIT ? OFFSET ?`).bind(pageSize, offset))
+    const total = Number((await env.DB.prepare('SELECT count(*) AS total FROM members').first<D1Row>())?.total || 0)
+    return success(list.map((row) => ({ ...memberSummary(row), status: row.status })), requestId, { page, pageSize, total, hasMore: offset + pageSize < total }, adminHeaders())
   }
   const id = requireUuid(path[0] || '')
   if (path.length === 1 && request.method === 'GET') {
     const row = await env.DB.prepare(`SELECT m.*, a.public_url AS avatar_url, (SELECT json_group_array(DISTINCT platform) FROM member_accounts ma WHERE ma.member_id=m.id) AS platforms_json FROM members m LEFT JOIN assets a ON a.id=m.avatar_asset_id WHERE m.id=?`).bind(id).first<D1Row>()
     if (!row) throw new ApiError(404, 'NOT_FOUND', '跑友资料不存在。')
-    return success({ ...(await memberDetail(env.DB, row)), status: row.status }, requestId, undefined, adminHeaders())
+    return success({ ...(await memberDetail(env.DB, row)), status: row.status, contentHash: String(row.content_hash) }, requestId, undefined, adminHeaders())
   }
   if (path[1] === 'publish' && request.method === 'POST') return publishMember(request, env, id, requestId)
   if (path[1] === 'unpublish' && request.method === 'POST') return unpublishMember(request, env, id, requestId)
@@ -169,13 +194,13 @@ async function publishMember(request: Request, env: Env, id: string, requestId: 
   const now = new Date().toISOString(), nextVersion = body.expectedVersion + 1, contentHash = await sha256Hex({ member: body.member, accounts: body.accounts })
   const data = { id, ...body.member, accounts: body.accounts.map((account) => ({ ...account, memberId: id })), status: 'published', version: nextVersion, contentHash, updatedAt: now }
   const envelope = { data, requestId }
-  const statements: D1PreparedStatement[] = [env.DB.prepare(`INSERT INTO members (id,display_name,avatar_asset_id,bio,sort_order,status,version,content_hash,updated_at) SELECT ?,?,?,?,?,'published',1,?,? WHERE ?=0 ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,avatar_asset_id=excluded.avatar_asset_id,bio=excluded.bio,sort_order=excluded.sort_order,status='published',version=members.version+1,content_hash=excluded.content_hash,updated_at=excluded.updated_at WHERE members.version=? RETURNING version`).bind(id, body.member.displayName.trim(), body.member.avatarAssetId, body.member.bio, body.member.sortOrder, contentHash, now, body.expectedVersion, body.expectedVersion)]
-  statements.push(env.DB.prepare(`DELETE FROM member_accounts WHERE member_id=? AND EXISTS (SELECT 1 FROM members WHERE id=? AND version=?)`).bind(id, id, nextVersion))
-  body.accounts.forEach((account) => statements.push(env.DB.prepare(`INSERT INTO member_accounts (id,member_id,platform,account_name,account_id,url,description,sort_order) SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM members WHERE id=? AND version=?)`).bind(account.id, id, account.platform, account.accountName.trim(), account.accountId, account.url, account.description || '', account.sortOrder, id, nextVersion)))
-  statements.push(env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'member',?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM members WHERE id=? AND version=?)`).bind(id, nextVersion, JSON.stringify(data), contentHash, 'obsidian-publisher', now, id, nextVersion))
-  statements.push(env.DB.prepare(`INSERT INTO idempotency_records (idempotency_key,operation,request_hash,response_json,entity_id,created_at) SELECT ?,'member-publish',?,?,?,? WHERE EXISTS (SELECT 1 FROM members WHERE id=? AND version=?)`).bind(key, requestHash, JSON.stringify(envelope), id, now, id, nextVersion))
-  const results = await env.DB.batch(statements)
-  if (!results[0]?.results?.length) await conflict(env, 'members', id)
+  const statements: D1PreparedStatement[] = [env.DB.prepare(`INSERT INTO members (id,display_name,avatar_asset_id,bio,sort_order,status,version,content_hash,updated_at) SELECT ?,?,?,?,?,'published',1,?,? WHERE ?=0 OR EXISTS (SELECT 1 FROM members WHERE id=? AND version=?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,avatar_asset_id=excluded.avatar_asset_id,bio=excluded.bio,sort_order=excluded.sort_order,status='published',version=members.version+1,content_hash=excluded.content_hash,updated_at=excluded.updated_at WHERE members.version=? RETURNING version`).bind(id, body.member.displayName.trim(), body.member.avatarAssetId, body.member.bio, body.member.sortOrder, contentHash, now, body.expectedVersion, id, body.expectedVersion, body.expectedVersion)]
+  statements.push(receiptAfterChange(env, key, 'member-publish', requestHash, envelope, id, now))
+  statements.push(env.DB.prepare(`DELETE FROM member_accounts WHERE member_id=? AND ${appliedReceipt}`).bind(id, key, requestHash))
+  body.accounts.forEach((account) => statements.push(env.DB.prepare(`INSERT INTO member_accounts (id,member_id,platform,account_name,account_id,url,description,sort_order) SELECT ?,?,?,?,?,?,?,? WHERE ${appliedReceipt}`).bind(account.id, id, account.platform, account.accountName.trim(), account.accountId, account.url, account.description || '', account.sortOrder, key, requestHash)))
+  statements.push(env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'member',?,?,?,?,?,? WHERE ${appliedReceipt}`).bind(id, nextVersion, JSON.stringify(data), contentHash, 'obsidian-publisher', now, key, requestHash))
+  const raced = await commitBatch(env, 'members', id, statements, key, requestHash)
+  if (raced) return raced
   return json(envelope, 200, adminHeaders())
 }
 
@@ -185,12 +210,12 @@ async function unpublishMember(request: Request, env: Env, id: string, requestId
   const key = idempotencyKey(request), requestHash = await sha256Hex({ operation: 'member-unpublish', id, body }), now = new Date().toISOString(), nextVersion = body.expectedVersion + 1
   const prior = await priorResponse(env, key, requestHash); if (prior) return prior
   const envelope = { data: { id, status: 'unpublished', version: nextVersion, updatedAt: now }, requestId }
-  const results = await env.DB.batch([
+  const raced = await commitBatch(env, 'members', id, [
     env.DB.prepare(`UPDATE members SET status='unpublished',version=version+1,updated_at=? WHERE id=? AND version=? RETURNING version`).bind(now, id, body.expectedVersion),
-    env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'member',id,version,json_object('id',id,'status',status,'version',version,'updatedAt',updated_at),content_hash,'obsidian-publisher',? FROM members WHERE id=? AND version=?`).bind(now, id, nextVersion),
-    env.DB.prepare(`INSERT INTO idempotency_records (idempotency_key,operation,request_hash,response_json,entity_id,created_at) SELECT ?,'member-unpublish',?,?,?,? WHERE EXISTS (SELECT 1 FROM members WHERE id=? AND version=?)`).bind(key, requestHash, JSON.stringify(envelope), id, now, id, nextVersion)
-  ])
-  if (!results[0]?.results?.length) await conflict(env, 'members', id)
+    receiptAfterChange(env, key, 'member-unpublish', requestHash, envelope, id, now),
+    env.DB.prepare(`INSERT INTO revisions (entity_type,entity_id,version,snapshot_json,content_hash,operator,created_at) SELECT 'member',id,version,json_object('id',id,'status',status,'version',version,'updatedAt',updated_at),content_hash,'obsidian-publisher',? FROM members WHERE id=? AND ${appliedReceipt}`).bind(now, id, key, requestHash)
+  ], key, requestHash)
+  if (raced) return raced
   return json(envelope, 200, adminHeaders())
 }
 
@@ -202,12 +227,14 @@ async function handleAssets(request: Request, env: Env, path: string[], requestI
     if (!Number.isInteger(body.sizeBytes) || body.sizeBytes < 1) throw new ApiError(400, 'VALIDATION_ERROR', 'sizeBytes 无效。')
     if (body.sizeBytes > maxSize) throw new ApiError(413, 'FILE_TOO_LARGE', `图片不能超过 ${Math.floor(maxSize / 1024 / 1024)} MiB。`)
     if (!/^[0-9a-f]{64}$/i.test(body.sha256)) throw new ApiError(400, 'VALIDATION_ERROR', 'sha256 必须是 64 位十六进制。')
-    const existing = await env.DB.prepare(`SELECT * FROM assets WHERE sha256=? AND status='ready'`).bind(body.sha256.toLowerCase()).first<D1Row>()
-    if (existing) return success({ assetId: existing.id, reused: true, uploadRequired: false, publicUrl: existing.public_url }, requestId, undefined, adminHeaders())
+    const existing = await env.DB.prepare(`SELECT * FROM assets WHERE sha256=?`).bind(body.sha256.toLowerCase()).first<D1Row>()
+    if (existing) return success({ assetId: existing.id, reused: existing.status === 'ready', uploadRequired: existing.status !== 'ready', ...(existing.status === 'ready' ? { publicUrl: existing.public_url } : { upload: { method: 'PUT', path: `/api/v1/admin/assets/${existing.id}/content`, maxSizeBytes: maxSize } }) }, requestId, undefined, adminHeaders())
     const id = crypto.randomUUID(), extension = extensionForMime(body.mimeType), objectKey = `assets/${body.sha256.toLowerCase()}.${extension}`, base = env.ASSET_PUBLIC_BASE_URL.replace(/\/$/, ''), publicUrl = `${base}/${objectKey}`, now = new Date().toISOString()
     const filename = String(body.filename || 'image').replace(/[\\/\0-\x1f]/g, '_').slice(0, 180)
-    await env.DB.prepare(`INSERT INTO assets (id,object_key,original_filename,mime_type,size_bytes,sha256,width,height,public_url,thumbnail_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,NULL,'pending',?)`).bind(id, objectKey, filename, body.mimeType, body.sizeBytes, body.sha256.toLowerCase(), Number.isInteger(body.width) ? body.width : null, Number.isInteger(body.height) ? body.height : null, publicUrl, now).run()
-    return success({ assetId: id, reused: false, uploadRequired: true, upload: { method: 'PUT', path: `/api/v1/admin/assets/${id}/content`, maxSizeBytes: maxSize } }, requestId, undefined, adminHeaders())
+    await env.DB.prepare(`INSERT INTO assets (id,object_key,original_filename,mime_type,size_bytes,sha256,width,height,public_url,thumbnail_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,NULL,'pending',?) ON CONFLICT(object_key) DO NOTHING`).bind(id, objectKey, filename, body.mimeType, body.sizeBytes, body.sha256.toLowerCase(), Number.isInteger(body.width) ? body.width : null, Number.isInteger(body.height) ? body.height : null, publicUrl, now).run()
+    const initialized = await env.DB.prepare('SELECT * FROM assets WHERE object_key=?').bind(objectKey).first<D1Row>()
+    if (!initialized) throw new Error('asset initialization failed')
+    return success({ assetId: initialized.id, reused: initialized.status === 'ready', uploadRequired: initialized.status !== 'ready', ...(initialized.status === 'ready' ? { publicUrl: initialized.public_url } : { upload: { method: 'PUT', path: `/api/v1/admin/assets/${initialized.id}/content`, maxSizeBytes: maxSize } }) }, requestId, undefined, adminHeaders())
   }
   const id = requireUuid(path[0] || '')
   if (path[1] === 'content' && request.method === 'PUT') {
