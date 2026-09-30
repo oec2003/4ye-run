@@ -1,0 +1,46 @@
+{
+  "purpose": "仅用于开发与跨端渲染测试，不是正式跑友或统计数据",
+  "cases": {
+    "reportWithoutImageOrStats": {
+      "id": "11111111-1111-5111-8111-111111111111",
+      "type": "report",
+      "title": "无海报、无统计的周报",
+      "summary": "验证未知统计不显示为 0，且没有查看海报入口。",
+      "format": "markdown",
+      "bodyMarkdown": "## 本周记录\n\n只保留已确认的文字。",
+      "coverAssetId": null,
+      "posterAssetId": null,
+      "imageAssetIds": [],
+      "authorMemberId": null,
+      "authorDisplayName": "Fixture 编辑",
+      "contributors": [],
+      "tags": [],
+      "periodStart": null,
+      "periodEnd": null,
+      "stats": null,
+      "publishedAt": "2024-01-01T00:00:00+08:00"
+    },
+    "veryLongTitle": {
+      "id": "22222222-2222-5222-8222-222222222222",
+      "title": "这是一个用于检查手机窄屏、桌面卡片和分享元信息是否能够自然换行而不会遮挡按钮或溢出容器的超长标题 🏃🏻‍♀️⛰️"
+    },
+    "plainTextEssay": {
+      "id": "33333333-3333-5333-8333-333333333333",
+      "format": "markdown",
+      "bodyMarkdown": "一段普通文字。\n\n> 一段引用。\n\n- 第一项\n- 第二项"
+    },
+    "imageEssay": {
+      "id": "44444444-4444-5444-8444-444444444444",
+      "format": "image",
+      "bodyMarkdown": "![历史图片长文](asset://55555555-5555-5555-8555-555555555555)"
+    },
+    "memberWithMultipleAccounts": {
+      "id": "66666666-6666-5666-8666-666666666666",
+      "displayName": "Fixture 跑友",
+      "accounts": [
+        { "id": "77777777-7777-5777-8777-777777777777", "platform": "xiaoyuzhou", "accountName": "Fixture 播客", "accountId": null, "url": "https://example.com/podcast", "description": "开发示例", "sortOrder": 0 },
+        { "id": "88888888-8888-5888-8888-888888888888", "platform": "xiaohongshu", "accountName": "Fixture 笔记", "accountId": "fixture-only", "url": null, "description": "验证无链接时只提供复制", "sortOrder": 1 }
+      ]
+    }
+  }
+}

@@ -1,0 +1,607 @@
+openapi: 3.1.0
+info:
+  title: 四野云跑共享 API
+  version: 1.0.0
+  description: 四野云跑 Web、Obsidian 发布插件与微信小程序共用的内容契约。公开读取无需登录，admin 写入使用专用 Bearer Token。
+servers:
+  - url: https://4ye.run/api/v1
+    description: Web 同域服务端代理（目标地址，需部署验证）
+  - url: https://api.4ye.run/api/v1
+    description: Worker 直连地址（目标地址，需部署验证）
+tags:
+  - name: Public
+  - name: Publishing
+  - name: Assets
+paths:
+  /health:
+    get:
+      tags: [Public]
+      operationId: getHealth
+      responses:
+        '200': { $ref: '#/components/responses/Health' }
+  /reports:
+    get:
+      tags: [Public]
+      operationId: listReports
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: year, in: query, schema: { type: string, pattern: '^\\d{4}$' } }
+        - { $ref: '#/components/parameters/Keyword' }
+      responses:
+        '200': { $ref: '#/components/responses/ContentList' }
+        '400': { $ref: '#/components/responses/Error' }
+  /reports/{id}:
+    get:
+      tags: [Public]
+      operationId: getReport
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /essays:
+    get:
+      tags: [Public]
+      operationId: listEssays
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { name: tag, in: query, schema: { type: string, maxLength: 40 } }
+        - { $ref: '#/components/parameters/Keyword' }
+      responses:
+        '200': { $ref: '#/components/responses/ContentList' }
+        '400': { $ref: '#/components/responses/Error' }
+  /essays/{id}:
+    get:
+      tags: [Public]
+      operationId: getEssay
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /members:
+    get:
+      tags: [Public]
+      operationId: listMembers
+      parameters:
+        - { $ref: '#/components/parameters/Page' }
+        - { $ref: '#/components/parameters/PageSize' }
+        - { $ref: '#/components/parameters/Keyword' }
+        - name: platform
+          in: query
+          schema: { $ref: '#/components/schemas/MemberPlatform' }
+      responses:
+        '200': { $ref: '#/components/responses/MemberList' }
+        '400': { $ref: '#/components/responses/Error' }
+  /members/{id}:
+    get:
+      tags: [Public]
+      operationId: getMember
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/MemberDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/contents:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: listAdminContents
+      responses:
+        '200': { $ref: '#/components/responses/ContentList' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /admin/contents/{id}:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: getAdminContent
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/contents/{id}/publish:
+    post:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: publishContent
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, content]
+              properties:
+                expectedVersion: { type: integer, minimum: 0 }
+                content: { $ref: '#/components/schemas/ContentWrite' }
+            examples:
+              create:
+                value:
+                  expectedVersion: 0
+                  content:
+                    type: report
+                    title: 四群周末跑步速递
+                    summary: 本周云跑摘要。
+                    format: markdown
+                    bodyMarkdown: "## 本周回顾\n\n一起继续跑。"
+                    coverAssetId: null
+                    posterAssetId: null
+                    imageAssetIds: []
+                    authorMemberId: null
+                    authorDisplayName: 四野云跑
+                    contributors: []
+                    tags: []
+                    periodStart: null
+                    periodEnd: null
+                    stats: null
+                    publishedAt: '2024-12-30T00:00:00+08:00'
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+  /admin/contents/{id}/unpublish:
+    post:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: unpublishContent
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { $ref: '#/components/requestBodies/ExpectedVersion' }
+      responses:
+        '200': { $ref: '#/components/responses/VersionResult' }
+        '409': { $ref: '#/components/responses/Error' }
+  /admin/contents/{id}/revisions:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: listContentRevisions
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200':
+          description: 版本摘要
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/SuccessBase' }
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/RevisionSummary' }
+  /admin/contents/{id}/revisions/{version}:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: getContentRevision
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { name: version, in: path, required: true, schema: { type: integer, minimum: 1 } }
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/contents/{id}/restore:
+    post:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: restoreContent
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, revisionVersion]
+              properties:
+                expectedVersion: { type: integer, minimum: 1 }
+                revisionVersion: { type: integer, minimum: 1 }
+      responses:
+        '200': { $ref: '#/components/responses/ContentDetail' }
+        '409': { $ref: '#/components/responses/Error' }
+  /admin/members:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: listAdminMembers
+      responses:
+        '200': { $ref: '#/components/responses/MemberList' }
+  /admin/members/{id}:
+    get:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: getAdminMember
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { $ref: '#/components/responses/MemberDetail' }
+        '404': { $ref: '#/components/responses/Error' }
+  /admin/members/{id}/publish:
+    post:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: publishMember
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [expectedVersion, member, accounts]
+              properties:
+                expectedVersion: { type: integer, minimum: 0 }
+                member: { $ref: '#/components/schemas/MemberWrite' }
+                accounts: { type: array, items: { $ref: '#/components/schemas/MemberAccountWrite' } }
+      responses:
+        '200': { $ref: '#/components/responses/MemberDetail' }
+        '409': { $ref: '#/components/responses/Error' }
+  /admin/members/{id}/unpublish:
+    post:
+      tags: [Publishing]
+      security: [{ publisherToken: [] }]
+      operationId: unpublishMember
+      parameters:
+        - { $ref: '#/components/parameters/Id' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody: { $ref: '#/components/requestBodies/ExpectedVersion' }
+      responses:
+        '200': { $ref: '#/components/responses/VersionResult' }
+        '409': { $ref: '#/components/responses/Error' }
+  /admin/assets/init:
+    post:
+      tags: [Assets]
+      security: [{ publisherToken: [] }]
+      operationId: initAsset
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AssetInit' }
+      responses:
+        '200':
+          description: 复用现有素材或返回上传要求
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: '#/components/schemas/SuccessBase' }
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        required: [assetId, reused, uploadRequired]
+                        properties:
+                          assetId: { type: string, format: uuid }
+                          reused: { type: boolean }
+                          uploadRequired: { type: boolean }
+                          publicUrl: { type: [string, 'null'], format: uri }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+  /admin/assets/{id}/content:
+    put:
+      tags: [Assets]
+      security: [{ publisherToken: [] }]
+      operationId: uploadAssetContent
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary, maxLength: 15728640 }
+          image/jpeg: { schema: { type: string, format: binary, maxLength: 15728640 } }
+          image/png: { schema: { type: string, format: binary, maxLength: 15728640 } }
+          image/webp: { schema: { type: string, format: binary, maxLength: 15728640 } }
+      responses:
+        '200':
+          description: 上传完成
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessBase' }
+        '400': { $ref: '#/components/responses/Error' }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+components:
+  securitySchemes:
+    publisherToken: { type: http, scheme: bearer, bearerFormat: opaque application token }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    Page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    PageSize: { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+    Keyword: { name: keyword, in: query, schema: { type: string, maxLength: 80 } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$' } }
+  requestBodies:
+    ExpectedVersion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [expectedVersion]
+            properties: { expectedVersion: { type: integer, minimum: 1 } }
+  responses:
+    Error:
+      description: 统一错误 envelope，HTTP 状态码表达实际错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+          example: { error: { code: VERSION_CONFLICT, message: 版本已变化，请重新读取后再发布。, details: { currentVersion: 3 } }, requestId: 7f106aa7-55fc-461d-b5fb-c27f6c6f0a47 }
+    Health:
+      description: 非敏感健康信息
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                properties: { data: { type: object, properties: { status: { const: ok }, service: { const: 4ye-run-api } } } }
+    ContentList:
+      description: 内容列表；不包含 bodyMarkdown 或 bodyBlocks
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                required: [data, meta]
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/ContentSummary' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+    ContentDetail:
+      description: 内容详情
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                properties: { data: { $ref: '#/components/schemas/ContentDetail' } }
+    MemberList:
+      description: 跑友列表
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/MemberSummary' } }
+                  meta: { $ref: '#/components/schemas/PageMeta' }
+    MemberDetail:
+      description: 跑友名片详情
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                properties: { data: { $ref: '#/components/schemas/MemberDetail' } }
+    VersionResult:
+      description: 下架结果
+      content:
+        application/json:
+          schema:
+            allOf:
+              - { $ref: '#/components/schemas/SuccessBase' }
+              - type: object
+                properties:
+                  data:
+                    type: object
+                    required: [id, status, version, updatedAt]
+                    properties:
+                      id: { type: string, format: uuid }
+                      status: { const: unpublished }
+                      version: { type: integer, minimum: 1 }
+                      updatedAt: { type: string, format: date-time }
+  schemas:
+    SuccessBase:
+      type: object
+      required: [data, requestId]
+      properties: { requestId: { type: string } }
+    ErrorEnvelope:
+      type: object
+      required: [error, requestId]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, enum: [VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT, FILE_TOO_LARGE, UNSUPPORTED_MEDIA_TYPE, RATE_LIMITED, INTERNAL_ERROR] }
+            message: { type: string }
+            details: {}
+        requestId: { type: string }
+    PageMeta:
+      type: object
+      required: [page, pageSize, total, hasMore]
+      properties:
+        page: { type: integer, minimum: 1 }
+        pageSize: { type: integer, minimum: 1, maximum: 50 }
+        total: { type: integer, minimum: 0 }
+        hasMore: { type: boolean }
+    ReportStats:
+      type: object
+      required: [totalDistanceKm, participantCount, participationCount, activeDays]
+      properties:
+        totalDistanceKm: { type: [number, 'null'], minimum: 0 }
+        participantCount: { type: [integer, 'null'], minimum: 0, description: 去重人数 }
+        participationCount: { type: [integer, 'null'], minimum: 0, description: 参与人次 }
+        activeDays: { type: [integer, 'null'], minimum: 0 }
+    Contributor:
+      type: object
+      required: [memberId, displayName, role]
+      properties:
+        memberId: { type: [string, 'null'], format: uuid }
+        displayName: { type: string }
+        role: { type: string }
+    ContentSummary:
+      type: object
+      required: [id, type, title, summary, format, coverAssetId, posterAssetId, authorMemberId, authorDisplayName, contributors, tags, periodStart, periodEnd, stats, version, publishedAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [report, essay] }
+        title: { type: string, maxLength: 180 }
+        summary: { type: string, maxLength: 600 }
+        format: { type: string, enum: [markdown, image] }
+        coverAssetId: { type: [string, 'null'], format: uuid }
+        posterAssetId: { type: [string, 'null'], format: uuid }
+        authorMemberId: { type: [string, 'null'], format: uuid }
+        authorDisplayName: { type: string }
+        contributors: { type: array, items: { $ref: '#/components/schemas/Contributor' } }
+        tags: { type: array, items: { type: string } }
+        periodStart: { type: [string, 'null'], format: date }
+        periodEnd: { type: [string, 'null'], format: date }
+        stats: { oneOf: [{ $ref: '#/components/schemas/ReportStats' }, { type: 'null' }] }
+        version: { type: integer, minimum: 1 }
+        publishedAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        coverUrl: { type: [string, 'null'], format: uri }
+    ContentDetail:
+      allOf:
+        - { $ref: '#/components/schemas/ContentSummary' }
+        - type: object
+          required: [bodyMarkdown, bodyBlocks, imageAssetIds, contentHash, assets]
+          properties:
+            bodyMarkdown: { type: string }
+            bodyBlocks: { type: array, items: { $ref: '#/components/schemas/BodyBlock' } }
+            imageAssetIds: { type: array, items: { type: string, format: uuid } }
+            contentHash: { type: string, pattern: '^[0-9a-f]{64}$' }
+            assets: { type: object, additionalProperties: { $ref: '#/components/schemas/Asset' } }
+    ContentWrite:
+      type: object
+      required: [type, title, summary, format, bodyMarkdown, coverAssetId, posterAssetId, imageAssetIds, authorMemberId, authorDisplayName, contributors, tags, periodStart, periodEnd, stats, publishedAt]
+      properties:
+        type: { type: string, enum: [report, essay] }
+        title: { type: string, minLength: 1, maxLength: 180 }
+        summary: { type: string, maxLength: 600 }
+        format: { type: string, enum: [markdown, image] }
+        bodyMarkdown: { type: string }
+        coverAssetId: { type: [string, 'null'], format: uuid }
+        posterAssetId: { type: [string, 'null'], format: uuid }
+        imageAssetIds: { type: array, items: { type: string, format: uuid } }
+        authorMemberId: { type: [string, 'null'], format: uuid }
+        authorDisplayName: { type: string }
+        contributors: { type: array, items: { $ref: '#/components/schemas/Contributor' } }
+        tags: { type: array, items: { type: string } }
+        periodStart: { type: [string, 'null'], format: date }
+        periodEnd: { type: [string, 'null'], format: date }
+        stats: { oneOf: [{ $ref: '#/components/schemas/ReportStats' }, { type: 'null' }] }
+        publishedAt: { type: string, format: date-time }
+    TextSpan:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string }
+        bold: { type: boolean }
+        italic: { type: boolean }
+        href: { type: string, format: uri, pattern: '^https?://' }
+    BodyBlock:
+      oneOf:
+        - type: object
+          required: [type, level, children]
+          properties: { type: { const: heading }, level: { type: integer, minimum: 1, maximum: 4 }, children: { type: array, items: { $ref: '#/components/schemas/TextSpan' } } }
+        - type: object
+          required: [type, children]
+          properties: { type: { const: paragraph }, children: { type: array, items: { $ref: '#/components/schemas/TextSpan' } } }
+        - type: object
+          required: [type, ordered, items]
+          properties: { type: { const: list }, ordered: { type: boolean }, items: { type: array, items: { type: array, items: { $ref: '#/components/schemas/TextSpan' } } } }
+        - type: object
+          required: [type, children]
+          properties: { type: { const: quote }, children: { type: array, items: { $ref: '#/components/schemas/TextSpan' } } }
+        - type: object
+          required: [type, assetId, sourceUrl, alt]
+          properties: { type: { const: image }, assetId: { type: [string, 'null'], format: uuid }, sourceUrl: { type: [string, 'null'], format: uri }, alt: { type: string }, caption: { type: string } }
+        - type: object
+          required: [type]
+          properties: { type: { const: divider } }
+      discriminator: { propertyName: type }
+    Asset:
+      type: object
+      required: [id, objectKey, originalFilename, mimeType, sizeBytes, sha256, width, height, publicUrl, thumbnailUrl, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        objectKey: { type: string }
+        originalFilename: { type: string }
+        mimeType: { type: string, enum: [image/jpeg, image/png, image/webp] }
+        sizeBytes: { type: integer, minimum: 1, maximum: 15728640 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        width: { type: [integer, 'null'], minimum: 1 }
+        height: { type: [integer, 'null'], minimum: 1 }
+        publicUrl: { type: string, format: uri }
+        thumbnailUrl: { type: [string, 'null'], format: uri }
+        status: { type: string, enum: [pending, ready] }
+        createdAt: { type: string, format: date-time }
+    AssetInit:
+      type: object
+      required: [filename, mimeType, sizeBytes, sha256]
+      properties:
+        filename: { type: string, maxLength: 180 }
+        mimeType: { type: string, enum: [image/jpeg, image/png, image/webp] }
+        sizeBytes: { type: integer, minimum: 1, maximum: 15728640 }
+        sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        width: { type: integer, minimum: 1 }
+        height: { type: integer, minimum: 1 }
+    MemberPlatform: { type: string, enum: [xiaoyuzhou, xiaohongshu, wechat_official, website, other] }
+    MemberSummary:
+      type: object
+      required: [id, displayName, avatarAssetId, bio, sortOrder, version, updatedAt, platforms]
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        avatarAssetId: { type: [string, 'null'], format: uuid }
+        avatarUrl: { type: [string, 'null'], format: uri }
+        bio: { type: string }
+        sortOrder: { type: integer }
+        version: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+        platforms: { type: array, items: { $ref: '#/components/schemas/MemberPlatform' } }
+    MemberDetail:
+      allOf:
+        - { $ref: '#/components/schemas/MemberSummary' }
+        - type: object
+          required: [accounts, recentContents]
+          properties:
+            accounts: { type: array, items: { $ref: '#/components/schemas/MemberAccount' } }
+            recentContents: { type: array, maxItems: 10, items: { $ref: '#/components/schemas/ContentSummary' } }
+    MemberWrite:
+      type: object
+      required: [displayName, avatarAssetId, bio, sortOrder]
+      properties:
+        displayName: { type: string, minLength: 1, maxLength: 80 }
+        avatarAssetId: { type: [string, 'null'], format: uuid }
+        bio: { type: string }
+        sortOrder: { type: integer }
+    MemberAccount:
+      allOf:
+        - { $ref: '#/components/schemas/MemberAccountWrite' }
+        - type: object
+          required: [memberId]
+          properties: { memberId: { type: string, format: uuid } }
+    MemberAccountWrite:
+      type: object
+      required: [id, platform, accountName, accountId, url, description, sortOrder]
+      properties:
+        id: { type: string, format: uuid }
+        platform: { $ref: '#/components/schemas/MemberPlatform' }
+        accountName: { type: string, minLength: 1 }
+        accountId: { type: [string, 'null'] }
+        url: { type: [string, 'null'], format: uri, pattern: '^https?://' }
+        description: { type: string }
+        sortOrder: { type: integer }
+    RevisionSummary:
+      type: object
+      required: [entityId, version, contentHash, createdAt]
+      properties:
+        entityId: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        contentHash: { type: string }
+        operator: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }

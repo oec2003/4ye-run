@@ -1,13 +1,17 @@
 {
-  "name": "nuxt3-app",
+  "name": "4ye-run-web",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "nuxt build",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
+    "migrate:legacy": "node tools/migrate-legacy.mjs",
+    "migrate:legacy:write": "node tools/migrate-legacy.mjs --write",
     "preview": "nuxt preview",
-    "postinstall": "nuxt prepare"
+    "postinstall": "nuxt prepare",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "typecheck:worker": "tsc --noEmit -p worker/tsconfig.json"
   },
   "devDependencies": {
     "@nuxt/devtools": "latest",
@@ -20,4 +24,4 @@
   "dependencies": {
     "@nuxtjs/vercel-builder": "latest"
   }
-} 
+}

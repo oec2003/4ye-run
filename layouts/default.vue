@@ -1,85 +1,50 @@
 <template>
-  <div class="layout-default">
-    <header>
-      <div class="site-title">跑者日历四野群周末云跑速递</div>
+  <div class="site-shell">
+    <a class="skip-link" href="#main-content">跳到正文</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <NuxtLink class="brand" to="/" aria-label="四野云跑首页">
+          <span class="brand-mark" aria-hidden="true">四</span>
+          <span>四野云跑</span>
+        </NuxtLink>
+        <nav class="desktop-nav" aria-label="主导航">
+          <NuxtLink v-for="item in navItems" :key="item.to" :to="item.to" :class="{ active: isActive(item.to) }">
+            {{ item.label }}
+          </NuxtLink>
+        </nav>
+        <span class="header-note">RUN FOR LOVE</span>
+      </div>
     </header>
-    
-    <main>
+
+    <main id="main-content" tabindex="-1">
       <slot />
     </main>
 
-    <footer>
-      <p>&copy; 2024 跑者日历四野群</p>
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div>
+          <strong>四野云跑</strong>
+          <p>记录我们一起跑过的路。</p>
+        </div>
+        <NuxtLink to="/about">关于与投稿说明</NuxtLink>
+      </div>
     </footer>
+
+    <nav class="mobile-nav" aria-label="移动端主导航">
+      <NuxtLink v-for="item in navItems" :key="item.to" :to="item.to" :class="{ active: isActive(item.to) }">
+        <AppIcon :name="item.icon" />
+        <span>{{ item.shortLabel }}</span>
+      </NuxtLink>
+    </nav>
   </div>
 </template>
 
-<style scoped>
-.layout-default {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-}
-
-header {
-  padding: 1.5rem 1rem;
-  background: linear-gradient(to right, #f5f5f5, #e0e0e0, #f5f5f5);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
-}
-
-.site-title {
-  text-align: center;
-  font-size: 2.5rem;
-  font-weight: 800;
-  background: linear-gradient(45deg, #00dc82 30%, #00b4d8 70%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-  letter-spacing: 2px;
-  position: relative;
-  padding: 10px 0;
-}
-
-.site-title::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 100px;
-  height: 3px;
-  background: linear-gradient(to right, transparent, #00dc82, transparent);
-}
-
-main {
-  flex: 1;
-  padding: 2rem;
-}
-
-footer {
-  padding: 1rem;
-  text-align: center;
-  background-color: #f5f5f5;
-  position: relative;
-  overflow: hidden;
-}
-
-footer p {
-  margin: 0;
-  padding: 0;
-  color: #666;
-}
-
-/* 移动端优化 */
-@media screen and (max-width: 768px) {
-  .site-title {
-    font-size: 1.6rem;
-    letter-spacing: 1px;
-  }
-
-  header {
-    padding: 1rem 0.5rem;
-  }
-}
-</style> 
+<script setup lang="ts">
+const route = useRoute()
+const navItems = [
+  { to: '/', label: '云跑周报', shortLabel: '周报', icon: 'report' },
+  { to: '/essays', label: '小作文', shortLabel: '小作文', icon: 'essay' },
+  { to: '/members', label: '跑友', shortLabel: '跑友', icon: 'members' }
+]
+const isActive = (to: string) => to === '/' ? route.path === '/' || route.path.startsWith('/reports') : route.path.startsWith(to)
+</script>

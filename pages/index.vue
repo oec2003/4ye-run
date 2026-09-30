@@ -1,386 +1,127 @@
 <template>
-  <div class="timeline-container">
-    <div v-if="loading" class="loading">
-      加载中...
-    </div>
-    <div v-else-if="error" class="error">
-      {{ error }}
-    </div>
-    <div v-else class="timeline">
-      <div v-for="(yearGroup, year) in groupedRecords" :key="year">
-        <div class="year-marker">
-          <span class="year-text">{{ year }}</span>
+  <div>
+    <section class="page-hero report-hero">
+      <div class="page-width hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">WEEKLY RUNNING NOTES</p>
+          <h1>云跑周报</h1>
+          <p>每一周，都是我们一起跑过的路。</p>
         </div>
-        <div v-for="(record, index) in yearGroup" :key="record.date" 
-             class="timeline-item" 
-             :class="{ 'left': index % 2 === 0, 'right': index % 2 === 1 }">
-          <div class="timeline-date">
-            <span class="month">{{ formatMonth(record.date) }}</span>
-            <span class="day">{{ formatDay(record.date) }}</span>
-          </div>
-          <div class="timeline-content">
-            <div class="record-header" v-text="record.title"></div>
-            <div class="record-content" v-html="formatContent(record.content || '')"></div>
-          </div>
+        <div class="trail-art" aria-hidden="true">
+          <span class="sun"></span>
+          <span class="ridge ridge-one"></span>
+          <span class="ridge ridge-two"></span>
+          <span class="trail"></span>
         </div>
       </div>
+    </section>
+
+    <div class="page-width section-stack">
+      <section aria-labelledby="reports-heading">
+        <div class="section-heading split-heading">
+          <div>
+            <p class="section-kicker">REPORTS</p>
+            <h2 id="reports-heading">周报归档</h2>
+          </div>
+          <p>共 {{ response?.meta?.total ?? 0 }} 期</p>
+        </div>
+
+        <form class="filter-bar" role="search" @submit.prevent="applyFilters">
+          <label class="search-field">
+            <AppIcon name="search" />
+            <span class="sr-only">搜索周报</span>
+            <input v-model="keywordInput" type="search" placeholder="搜索标题或摘要" />
+          </label>
+          <label class="select-field">
+            <AppIcon name="calendar" />
+            <span class="sr-only">按年份筛选</span>
+            <select v-model="yearInput" @change="applyFilters">
+              <option value="">全部年份</option>
+              <option v-for="year in yearOptions" :key="year" :value="year">{{ year }} 年</option>
+            </select>
+          </label>
+          <button class="button-secondary" type="submit">筛选</button>
+        </form>
+
+        <div v-if="pending" class="skeleton-stack" aria-live="polite" aria-label="周报加载中">
+          <span v-for="n in 3" :key="n" class="skeleton-card"></span>
+        </div>
+        <section v-else-if="error" class="error-state" role="alert">
+          <h2>周报暂时没有加载出来</h2>
+          <p>请检查网络后再试一次。</p>
+          <button class="button-secondary" type="button" @click="refresh">重新加载</button>
+        </section>
+        <EmptyState v-else-if="!items.length" title="没有找到周报" description="换一个年份或关键词试试。" />
+        <div v-else class="report-grid">
+          <article v-for="(report, index) in items" :key="report.id" :class="['report-card', { featured: index === 0 && currentPage === 1 }]">
+            <div class="report-card-accent" aria-hidden="true">
+              <span>{{ formatShanghaiDate(report.publishedAt).slice(0, 4) }}</span>
+              <strong>{{ formatShanghaiDate(report.publishedAt).slice(5) }}</strong>
+            </div>
+            <div class="report-card-body">
+              <div class="card-meta">
+                <span>云跑周报</span>
+                <time :datetime="report.publishedAt">{{ formatShanghaiDate(report.publishedAt) }}</time>
+              </div>
+              <h3><NuxtLink :to="`/reports/${report.id}`">{{ report.title }}</NuxtLink></h3>
+              <p>{{ report.summary }}</p>
+              <dl v-if="statEntries(report).length" class="compact-stats">
+                <div v-for="stat in statEntries(report)" :key="stat.label"><dt>{{ stat.label }}</dt><dd>{{ stat.value }}</dd></div>
+              </dl>
+              <div class="card-footer">
+                <span>{{ formatPeriod(report.periodStart, report.periodEnd) }}</span>
+                <NuxtLink class="text-link" :to="`/reports/${report.id}`">阅读本期</NuxtLink>
+              </div>
+            </div>
+          </article>
+        </div>
+        <PaginationNav v-if="response?.meta" :page="response.meta.page" :page-size="response.meta.pageSize" :total="response.meta.total" @change="goToPage" />
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
-import { useRunningData } from '~/composables/useRunningData'
+import type { ApiSuccess, ContentSummary } from '~/contracts/types'
+import { formatPeriod, formatShanghaiDate } from '~/utils/format'
 
-const records = ref<Array<any>>([])
-const loading = ref(true)
-const error = ref('')
-
-// 按年份分组的记录
-const groupedRecords = computed(() => {
-  const groups: Record<string, any[]> = {}
-  records.value.forEach(record => {
-    const year = new Date(record.date).getFullYear()
-    if (!groups[year]) {
-      groups[year] = []
-    }
-    groups[year].push(record)
-  })
-  // 按年份降序排序
-  return Object.fromEntries(
-    Object.entries(groups).sort(([a], [b]) => Number(b) - Number(a))
-  )
+const route = useRoute()
+const router = useRouter()
+const config = useRuntimeConfig()
+const currentPage = computed(() => Math.max(1, Number(route.query.page) || 1))
+const keywordInput = ref(typeof route.query.keyword === 'string' ? route.query.keyword : '')
+const yearInput = ref(typeof route.query.year === 'string' ? route.query.year : '')
+const requestUrl = computed(() => {
+  const query = new URLSearchParams({ page: String(currentPage.value), pageSize: '6' })
+  if (typeof route.query.keyword === 'string' && route.query.keyword) query.set('keyword', route.query.keyword)
+  if (typeof route.query.year === 'string' && route.query.year) query.set('year', route.query.year)
+  return `${config.public.apiBaseUrl}/reports?${query}`
 })
+const { data: response, pending, error, refresh } = await useFetch<ApiSuccess<ContentSummary[]>>(requestUrl)
+const items = computed(() => response.value?.data ?? [])
+const yearOptions = computed(() => [...new Set(items.value.map((item) => formatShanghaiDate(item.publishedAt).slice(0, 4)))].sort().reverse())
 
-onMounted(async () => {
-  try {
-    const { runningRecords } = await useRunningData()
-    records.value = runningRecords
-  } catch (e) {
-    error.value = '加载数据失败，请稍后重试'
-    console.error(e)
-  } finally {
-    loading.value = false
-  }
+function applyFilters() {
+  router.push({ query: { ...(keywordInput.value.trim() ? { keyword: keywordInput.value.trim() } : {}), ...(yearInput.value ? { year: yearInput.value } : {}) } })
+}
+function goToPage(page: number) {
+  router.push({ query: { ...route.query, page: String(page) } })
+  window.scrollTo({ top: 280, behavior: 'smooth' })
+}
+function statEntries(report: ContentSummary) {
+  if (!report.stats) return []
+  return [
+    report.stats.totalDistanceKm == null ? null : { label: '公里', value: report.stats.totalDistanceKm.toLocaleString('zh-CN') },
+    report.stats.participantCount == null ? null : { label: '位跑友', value: String(report.stats.participantCount) },
+    report.stats.participationCount == null ? null : { label: '人次', value: String(report.stats.participationCount) },
+    report.stats.activeDays == null ? null : { label: '天同行', value: String(report.stats.activeDays) }
+  ].filter(Boolean) as Array<{ label: string; value: string }>
+}
+
+useSeoMeta({
+  title: '云跑周报｜四野云跑',
+  description: '查看四野云跑每周整理的跑步周报。',
+  ogTitle: '云跑周报｜四野云跑',
+  ogDescription: '每一周，都是我们一起跑过的路。'
 })
-
-const formatMonth = (dateString: string) => {
-  if (!dateString) return ''
-  const date = new Date(dateString)
-  return date.getMonth() + 1
-}
-
-const formatDay = (dateString: string) => {
-  if (!dateString) return ''
-  const date = new Date(dateString)
-  return date.getDate()
-}
-
-const formatContent = (content: string) => {
-  if (!content) return ''
-  return content.replace(/\n/g, '<br>')
-}
 </script>
-
-<style scoped>
-.timeline-container {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 10px;
-}
-
-.timeline {
-  position: relative;
-  padding: 0;
-}
-
-.timeline::before {
-  content: '';
-  position: absolute;
-  width: 2px;
-  background: linear-gradient(to bottom, transparent, #00dc82, transparent);
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  margin-left: -1px;
-}
-
-.year-marker {
-  text-align: center;
-  padding: 20px 0;
-  position: relative;
-  z-index: 2;
-  margin: 20px 0;
-}
-
-.year-text {
-  background: linear-gradient(45deg, #00dc82, #00b4d8);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  font-size: 2em;
-  font-weight: 900;
-  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-  position: relative;
-  display: inline-block;
-  padding: 0 20px;
-  margin-top: 0;
-}
-
-.year-text::before {
-  content: '';
-  position: absolute;
-  width: 100px;
-  height: 4px;
-  background: linear-gradient(to right, transparent, #00dc82, transparent);
-  bottom: -10px;
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.timeline-date {
-  position: absolute;
-  width: 60px;
-  height: 60px;
-  background: linear-gradient(135deg, #00dc82, #00b4d8);
-  border-radius: 50%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  color: white;
-  font-weight: bold;
-  z-index: 2;
-  right: -30px;
-  top: 15px;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
-  transition: transform 0.3s ease;
-}
-
-.timeline-date:hover {
-  transform: scale(1.1);
-}
-
-.timeline-item.right .timeline-date {
-  left: -30px;
-}
-
-.month {
-  font-size: 1.2em;
-  line-height: 1;
-}
-
-.day {
-  font-size: 0.9em;
-  opacity: 0.9;
-}
-
-.timeline-content {
-  padding: 20px;
-  background: #f3e0fa;
-  border-radius: 12px;
-  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-  transition: transform 0.3s ease;
-  margin: 0 40px;
-  width: calc(100% - 80px);
-  overflow-wrap: break-word;
-}
-
-.timeline-content:hover {
-  transform: translateY(-5px);
-}
-
-.timeline-item {
-  padding: 10px 40px;
-  position: relative;
-  width: 50%;
-  box-sizing: border-box;
-  margin: 40px 0;
-}
-
-.timeline-item.right {
-  left: 50%;
-}
-
-.timeline-item.left {
-  left: 0;
-}
-
-.record-header {
-  font-size: 1.2em;
-  font-weight: bold;
-  margin: 10px 0;
-  color: #00dc82;
-  white-space: nowrap;
-  overflow: visible;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-}
-
-.record-content {
-  white-space: pre-line;
-  line-height: 1.8;
-}
-
-.record-content :deep(br) {
-  margin-bottom: 0.5em;
-}
-
-/* 修改响应式设计部分 */
-@media screen and (max-width: 768px) {
-  .timeline-container {
-    padding: 5px;
-  }
-
-  .timeline::before {
-    left: 25px;
-  }
-  
-  .timeline-item {
-    width: 100%;
-    padding-left: 60px;
-    padding-right: 5px;
-    margin: 40px 0;
-  }
-  
-  .timeline-item.right {
-    left: 0;
-  }
-  
-  .timeline-date {
-    width: 45px;
-    height: 45px;
-    left: 0 !important;
-    right: auto !important;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    line-height: 1.2;
-  }
-
-  .timeline-content {
-    margin: 0 0 0 15px;
-    width: calc(100% - 15px);
-    padding: 12px 10px;
-  }
-
-  .month {
-    font-size: 1.1em;
-    display: block;
-    margin-bottom: 2px;
-  }
-
-  .day {
-    font-size: 0.9em;
-    display: block;
-  }
-
-  .year-marker {
-    padding: 10px 0;
-    margin: 10px 0;
-  }
-}
-
-/* 更小屏幕的优化 */
-@media screen and (max-width: 480px) {
-  .timeline-container {
-    padding: 3px;
-  }
-
-  .timeline::before {
-    left: 25px;
-  }
-
-  .timeline-item {
-    padding-left: 60px;
-    margin: 50px 0;
-  }
-
-  .timeline-content {
-    margin: 0 0 0 8px;
-    width: calc(100% - 8px);
-    padding: 10px 8px;
-  }
-
-  .timeline-date {
-    width: 50px;
-    height: 50px;
-  }
-
-  .record-header {
-    font-size: 0.95em;
-    padding: 0 5px;
-  }
-
-  .month {
-    font-size: 0.85em;
-  }
-
-  .day {
-    font-size: 0.7em;
-  }
-
-
-.year-text {
-  background: linear-gradient(45deg, #00dc82, #00b4d8);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  font-size: 1.4em;
-  font-weight: 900;
-  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-  position: relative;
-  display: inline-block;
-  padding: 0 20px;
-  margin-top: 0;
-}
-}
-
-.loading, .error {
-  text-align: center;
-  padding: 2rem;
-  color: #666;
-}
-
-.error {
-  color: #ff4444;
-}
-
-/* 添加年份标记样式 */
-.year-marker {
-  text-align: center;
-  padding: 20px 0;
-  font-size: 1.5em;
-  font-weight: bold;
-  color: #00dc82;
-  position: relative;
-  z-index: 2;
-  background: white;
-  /* margin: 0px 0; */
-  text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-
-.year-marker::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: #00dc82;
-  z-index: -1;
-}
-
-.year-marker::after {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 100px;
-  height: 100%;
-  background: white;
-  z-index: -1;
-}
-</style> 
