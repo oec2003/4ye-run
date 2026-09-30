@@ -1,100 +1,119 @@
-# 部署与运维
+# Cloudflare 部署与运维
 
-以下步骤不会自动执行。先在测试环境完成，再经人工确认应用到正式环境。
+## 当前生产拓扑
 
-## 1. Cloudflare Worker、D1 与 R2
-
-Wrangler 需要 4.36.0 或更高版本（代码使用 Rate Limiting binding）。
-
-```bash
-cd worker
-cp wrangler.example.jsonc wrangler.jsonc
-npx wrangler@latest d1 create 4ye-run-production
-npx wrangler@latest r2 bucket create 4ye-run-assets-production
+```text
+浏览器 / 小程序
+  ├─ https://4ye.run              Nuxt Worker + Workers Static Assets
+  │    └─ /api/v1/*               Service Binding：API_SERVICE
+  ├─ https://api.4ye.run          API Worker
+  │    ├─ DB                      D1：4yerun
+  │    └─ ASSETS                  R2：4ye-run
+  └─ https://img.4ye.run          R2 Custom Domain（active，TLS 1.2+）
 ```
 
-把 D1 返回的 ID 填入 `wrangler.jsonc`。`DB`、`ASSETS`、`PUBLIC_RATE_LIMITER` 是固定 binding 名，不要改成前端环境变量。应用级发布令牌只写 Worker secret：
+正式资源：
+
+- Cloudflare 账户：`2170afbdc1cf71583e1b5235226c77d7`
+- D1：`4yerun`，UUID `e6686ffb-aa18-41f4-92a6-a1c413528e9b`
+- R2：`4ye-run`
+- Web Worker：`4ye-run-web`
+- API Worker：`4ye-run-api`
+
+`wrangler.jsonc` 是 Web Worker 的正式配置；`worker/wrangler.jsonc` 是 API Worker 的正式配置。绑定有变化后必须重新运行 `types:web` 或 `types:api`，不要手写整套 Cloudflare binding 类型。
+
+## 首次配置与校验
 
 ```bash
-npx wrangler@latest secret put PUBLISH_TOKEN
+corepack yarn install --frozen-lockfile
+corepack yarn types:api
+corepack yarn types:web
+corepack yarn test
+corepack yarn typecheck:worker
+corepack yarn build:cloudflare
 ```
 
-先应用本地 migration 并运行 Worker：
+发布令牌只保存在 Git 忽略的 `worker/.dev.vars`，权限为 `600`，不会输出到终端：
 
 ```bash
-npx wrangler@latest d1 migrations apply 4ye-run-production --local
-npx wrangler@latest dev
+corepack yarn configure:publish-token
 ```
 
-确认测试环境后，再显式应用远端 migration：
+不要把该文件提交到 Git、粘贴到文档或传到公开 R2。
+
+## D1 migration 与历史导入
 
 ```bash
-npx wrangler@latest d1 migrations apply 4ye-run-production --remote
-npx wrangler@latest deploy
+./node_modules/.bin/wrangler d1 migrations list 4yerun --remote --config worker/wrangler.jsonc
+./node_modules/.bin/wrangler d1 migrations apply 4yerun --remote --config worker/wrangler.jsonc
+corepack yarn migrate:d1:export
+./node_modules/.bin/wrangler d1 execute 4yerun --remote --config worker/wrangler.jsonc --file exports/legacy-import.sql
 ```
 
-D1 `batch()` 是事务序列；本实现把条件版本更新、关联表、revision 和幂等记录放在同一 batch 内。条件更新未命中时不会写入关联，API 返回 409；历史恢复总是形成新版本。
+导入 SQL 以 `source_key` 去重；已存在的历史行不会被覆盖。当前生产库包含 16 条周报、3 条小作文与 19 条初始 revision。图片类型小作文仍需下载源图、验证真实 MIME/大小/hash、上传 R2，再把正文改为 `asset://UUID`。
 
-## 2. 域名与素材
+## Worker 部署
 
-在 R2 桶设置中把 `img.4ye.run` 连接为 Custom Domain；正式环境不要依赖受限的 `r2.dev` 开发地址。确认状态为 Active 后再把 `ASSET_PUBLIC_BASE_URL` 设为该域名。R2 object key 由 sha256 产生并保持不可变。
-
-把 Worker 绑定到 `api.4ye.run`，然后核验：
+先部署 API，再部署 Web，确保 Service Binding 的目标已存在：
 
 ```bash
+corepack yarn deploy:api
+corepack yarn deploy:web
+```
+
+API 部署会绑定 `api.4ye.run`；Web 部署会绑定 `4ye.run`。Custom Domain 会由 Cloudflare 管理 DNS 与证书，不要手动创建同名 A/CNAME。公开站点的浏览器请求使用 `/api/v1`，Web Worker 再通过 `API_SERVICE` 直连 API Worker；Obsidian 发布插件继续直连 `https://api.4ye.run/api/v1`。
+
+## `img.4ye.run` 配置
+
+生产域名已连接到 R2 桶。首次配置或灾难恢复时，先在 Cloudflare 域名概述页复制 32 位 **Zone ID**。不要发送 API Token、Global API Key 或发布令牌；只需要 Zone ID。然后运行：
+
+```bash
+./node_modules/.bin/wrangler r2 bucket domain add 4ye-run \
+  --domain img.4ye.run \
+  --zone-id <ZONE_ID> \
+  --min-tls 1.2 \
+  --config worker/wrangler.jsonc \
+  --force
+```
+
+查询状态：
+
+```bash
+./node_modules/.bin/wrangler r2 bucket domain list 4ye-run --config worker/wrangler.jsonc
+```
+
+等待 ownership 与 SSL 都变为 active。不要预先创建 `img` DNS 记录；Wrangler/Cloudflare 会处理。R2 object key 由 sha256 产生并保持不可变。
+
+## 上线核验
+
+```bash
+curl -i https://4ye.run/
+curl -i 'https://4ye.run/api/v1/reports?page=1&pageSize=1'
 curl -i https://api.4ye.run/api/v1/health
-curl -i https://api.4ye.run/api/v1/reports
+curl -i -H 'Origin: https://4ye.run' 'https://api.4ye.run/api/v1/reports?page=1&pageSize=1'
 curl -i -X POST https://api.4ye.run/api/v1/admin/contents/00000000-0000-5000-8000-000000000000/publish
 ```
 
-前两项应为 JSON；第三项不带令牌必须为 401，不能被浏览器挑战页或 HTML fallback 替代。
+预期：首页和公开接口为 200；CORS 响应包含 `access-control-allow-origin: https://4ye.run`；最后一个无令牌管理请求必须为 401。若刚绑定根域时本机仍报无法解析，先用 `dig A 4ye.run @1.1.1.1` 核对权威结果，等待本机 DNS 的旧负缓存过期。
 
-## 3. Vercel Web
+## 缓存、下架与备份
 
-Vercel 项目根目录指向本仓库，框架保持 Nuxt。设置：
-
-```text
-NUXT_PUBLIC_API_BASE_URL=/api/v1
-WORKER_API_BASE_URL=https://api.4ye.run/api/v1
-```
-
-Nitro 路由 `server/api/v1/[...path].ts` 是服务端代理，会保留方法、原始请求体、Content-Type、Authorization、Idempotency-Key、上游状态码和 JSON。不要再加 SPA fallback 覆盖 `/api/v1/*`。
-
-Vercel Function 的请求/响应 payload 上限目前为 4.5 MB，而素材上限为 15 MiB。因此：
-
-- Web 公共查询可使用同域代理；
-- Obsidian 发布插件的 JSON 发布请求可直连 Worker；
-- 素材 PUT 必须直连 Worker，不能经过 Vercel Function；
-- 上线前分别用小文件、4.5 MB 附近和 15 MiB 文件验证实际链路。
-
-## 4. 缓存与下架
-
-公开 API 当前发送最长 60 秒的共享缓存；admin 强制 `no-store`。第一版没有跨 Vercel/Cloudflare 的主动 purge，所以发布或下架后最多可能等待约 60 秒。下架后 D1 查询返回 404，但已经下载的公开图片和浏览器缓存不能被撤回。
-
-若将来要求即时失效，应增加可审计的 Cloudflare cache purge 与 Vercel cache tag 流程，不要在发布成功前声称两层缓存已经刷新。
-
-## 5. 历史迁移
-
-先查看 `docs/migration-dry-run.md` 和 `server/data/legacy-content.json`。正式导入必须逐条展示待写对象，不覆盖已经编辑的同 ID 正式版本；`sourceKey` 用于重复执行去重。
-
-图片类型小作文目前处于待修复状态。获得授权后：下载源图、验证真实文件类型/大小/hash、调用 `assets/init`、PUT 二进制，再以 `asset://UUID` 更新正文。下载失败要保留源 URL 和失败记录，不能标记为完成。
-
-## 6. 备份
+公开 API 发送 60 秒共享缓存；admin 强制 `no-store`。发布或下架后最多可能等待约 60 秒；D1 中下架内容会返回 404，但已经下载的公开图片和浏览器缓存不能被撤回。
 
 D1 全量备份：
 
 ```bash
-npx wrangler@latest d1 export 4ye-run-production --remote --output=./private-backups/4ye-run-$(date +%F).sql
+./node_modules/.bin/wrangler d1 export 4yerun --remote \
+  --config worker/wrangler.jsonc \
+  --output ./private-backups/4ye-run-YYYY-MM-DD.sql
 ```
 
-备份目录必须在私有存储中；不要上传到公开 R2 桶。R2 素材按不可变 key 保存，应另行配置账户级保留与备份策略。
+备份目录必须位于私有存储，不要上传到公开 R2 桶。
 
-## 7. 官方规则核验
+## 官方文档
 
-- [Cloudflare D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/)
+- [Cloudflare Nuxt on Workers](https://developers.cloudflare.com/workers/framework-guides/web-apps/more-web-frameworks/nuxt/)
+- [Cloudflare Service Bindings](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/)
 - [Cloudflare Wrangler 配置](https://developers.cloudflare.com/workers/wrangler/configuration/)
-- [Cloudflare Worker Rate Limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)
-- [Cloudflare R2 公共桶与自定义域名](https://developers.cloudflare.com/r2/buckets/public-buckets/)
 - [Cloudflare D1 导入与导出](https://developers.cloudflare.com/d1/best-practices/import-export-data/)
-- [Vercel rewrites](https://vercel.com/docs/routing/rewrites)
-- [Vercel Function 限制](https://vercel.com/docs/functions/limitations)
+- [Cloudflare R2 自定义域名](https://developers.cloudflare.com/r2/buckets/public-buckets/)

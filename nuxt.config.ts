@@ -6,6 +6,11 @@ export default defineNuxtConfig({
   devtools: { enabled: false },
   modules: [],
   css: ['~/assets/css/main.css'],
+  nitro: {
+    // Nuxt 3.14 / Nitro 2 uses this preset name for Cloudflare's module
+    // Worker plus Workers Static Assets.
+    preset: 'cloudflare-module'
+  },
   runtimeConfig: {
     workerApiBaseUrl: process.env.WORKER_API_BASE_URL || '',
     public: {

@@ -6,11 +6,11 @@
 
 ```text
 pages/                 Nuxt Web：周报、小作文、跑友及详情
-server/api/v1/         Vercel/Nitro 同域 API 代理；未配置 Worker 时只读本地 fixture
+server/api/v1/         Nitro 同域 API 路由；生产优先走 Cloudflare Service Binding
 contracts/             三端共享类型、bodyBlocks、安全 Markdown 转换、hash 与运行时校验
-worker/                Cloudflare Worker、D1 migration、Wrangler 配置模板
+worker/                Cloudflare API Worker、D1 migration 与 Wrangler 配置
 fixtures/              开发验收 fixture，不是正式跑友数据
-tools/                 历史数据 dry-run/本地 fixture 与 JSON 导出
+tools/                 历史数据转换、D1 导入 SQL、备份与密钥初始化工具
 docs/                  迁移、部署和验证记录
 openapi.yaml           API v1 规范
 ```
@@ -33,6 +33,16 @@ corepack yarn dev
 corepack yarn test
 corepack yarn typecheck:worker
 corepack yarn build
+```
+
+Cloudflare 类型与部署：
+
+```bash
+corepack yarn types:api
+corepack yarn types:web
+corepack yarn configure:publish-token
+corepack yarn deploy:api
+corepack yarn deploy:web
 ```
 
 迁移 dry-run：
@@ -60,4 +70,4 @@ node tools/export-content.mjs ./exports/content-backup.json
 
 ## 当前边界
 
-代码未连接或修改生产 D1、R2、DNS、Vercel 项目。历史图片长文的远程图片保留源地址并标记待迁；正式导入 R2 需要网络与云环境授权。Vercel Function 当前请求/响应体上限低于本站 15 MiB 素材上限，因此发布插件必须把素材二进制直传 Worker，不能经过 Web 代理。
+生产网站与 API 已部署到 Cloudflare Workers，D1 已导入 16 条周报、3 条小作文和 19 条初始版本。`4ye.run` 与 `api.4ye.run` 已由 Worker Custom Domain 承载；Web 到 API 使用 Service Binding。`img.4ye.run` 已绑定 R2 桶 `4ye-run`，ownership 与 SSL 均为 active。历史图片长文仍保留源地址并标记待迁。发布插件应把素材二进制直传 `api.4ye.run`，不经过 Web 同域路由。

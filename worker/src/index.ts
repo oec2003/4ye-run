@@ -21,7 +21,7 @@ export default {
       const route = segments.slice(2)
       let response: Response
       if (route[0] === 'admin') {
-        requireAdmin(request, env)
+        await requireAdmin(request, env)
         response = await handleAdmin(request, env, route, requestId)
       } else {
         if (env.PUBLIC_RATE_LIMITER) {
@@ -36,4 +36,4 @@ export default {
       return applyCors(failure(error instanceof Error ? error : new Error('unknown error'), requestId), request, env)
     }
   }
-}
+} satisfies ExportedHandler<Env>

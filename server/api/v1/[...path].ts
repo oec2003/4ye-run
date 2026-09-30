@@ -1,5 +1,14 @@
-import { getQuery, getRouterParam, getRequestHeader, getRequestURL, proxyRequest, setHeader, setResponseStatus } from 'h3'
+import { getQuery, getRouterParam, getRequestHeader, getRequestURL, proxyRequest, setHeader, setResponseStatus, toWebRequest } from 'h3'
 import { getLocalContent, getLocalMember, listLocalContents, listLocalMembers } from '../../utils/localContent'
+
+interface ServiceBinding {
+  fetch(request: Request): Promise<Response>
+}
+
+function apiService(event: Parameters<typeof toWebRequest>[0]): ServiceBinding | undefined {
+  const env = event.context.cloudflare?.env as CloudflareEnv | undefined
+  return env?.API_SERVICE
+}
 
 function requestId(event: Parameters<typeof getRequestHeader>[0]) {
   return getRequestHeader(event, 'x-request-id') || crypto.randomUUID()
@@ -14,6 +23,13 @@ function fail(event: Parameters<typeof setResponseStatus>[0], status: number, co
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig(event)
   const path = (getRouterParam(event, 'path') || '').replace(/^\/+|\/+$/g, '')
+
+  const service = apiService(event)
+  if (service) {
+    const incoming = toWebRequest(event)
+    const target = new URL(`/api/v1/${path}${getRequestURL(event).search}`, 'https://api.4ye.run')
+    return service.fetch(new Request(target, incoming))
+  }
 
   if (config.workerApiBaseUrl) {
     const incoming = getRequestURL(event)

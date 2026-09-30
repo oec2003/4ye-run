@@ -35,15 +35,21 @@ export function corsHeaders(request: Request, env: Env): HeadersInit {
   }
 }
 
-export function requireAdmin(request: Request, env: Env): void {
+export async function requireAdmin(request: Request, env: Env): Promise<void> {
   const value = request.headers.get('authorization')
   if (!value?.startsWith('Bearer ')) throw new ApiError(401, 'UNAUTHORIZED', '缺少发布凭据。')
   const supplied = value.slice(7)
   const expected = env.PUBLISH_TOKEN || ''
-  let different = supplied.length ^ expected.length
-  const max = Math.max(supplied.length, expected.length)
-  for (let index = 0; index < max; index++) different |= (supplied.charCodeAt(index) || 0) ^ (expected.charCodeAt(index) || 0)
-  if (different !== 0 || !expected) throw new ApiError(403, 'FORBIDDEN', '发布凭据无效。')
+  if (!expected) throw new ApiError(503, 'PUBLISH_TOKEN_NOT_CONFIGURED', '发布凭据尚未配置。')
+  const encoder = new TextEncoder()
+  const [suppliedHash, expectedHash] = await Promise.all([
+    crypto.subtle.digest('SHA-256', encoder.encode(supplied)),
+    crypto.subtle.digest('SHA-256', encoder.encode(expected))
+  ])
+  const subtle = crypto.subtle as SubtleCrypto & {
+    timingSafeEqual(a: ArrayBuffer | ArrayBufferView, b: ArrayBuffer | ArrayBufferView): boolean
+  }
+  if (!subtle.timingSafeEqual(suppliedHash, expectedHash)) throw new ApiError(403, 'FORBIDDEN', '发布凭据无效。')
 }
 
 export function requireUuid(value: string, field = 'id'): string {

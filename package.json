@@ -4,24 +4,30 @@
   "type": "module",
   "scripts": {
     "build": "nuxt build",
+    "build:cloudflare": "nuxt build",
+    "configure:publish-token": "node tools/generate-local-publish-token.mjs",
+    "deploy:api": "wrangler deploy --config worker/wrangler.jsonc --secrets-file worker/.dev.vars",
+    "deploy:web": "yarn build:cloudflare && wrangler deploy --config wrangler.jsonc",
     "dev": "nuxt dev",
     "generate": "nuxt generate",
+    "migrate:d1:export": "node tools/export-d1-import.mjs",
     "migrate:legacy": "node tools/migrate-legacy.mjs",
     "migrate:legacy:write": "node tools/migrate-legacy.mjs --write",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "test": "node --experimental-strip-types --test tests/*.test.mjs",
-    "typecheck:worker": "tsc --noEmit -p worker/tsconfig.json"
+    "typecheck:worker": "tsc --noEmit -p worker/tsconfig.json",
+    "types:api": "wrangler types worker/worker-configuration.d.ts --config worker/wrangler.jsonc --env-interface ApiEnv --include-runtime false",
+    "types:web": "wrangler types worker-configuration.d.ts --config wrangler.jsonc --env-interface CloudflareEnv --include-runtime false"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260930.1",
     "@nuxt/devtools": "latest",
     "@types/node": "^20.0.0",
     "nuxt": "^3.10.0",
     "typescript": "^5.0.0",
     "vue": "^3.4.0",
-    "vue-router": "^4.2.0"
-  },
-  "dependencies": {
-    "@nuxtjs/vercel-builder": "latest"
+    "vue-router": "^4.2.0",
+    "wrangler": "^4.144.0"
   }
 }
